@@ -1,0 +1,47 @@
+# Runs the full pipeline daily: scrapes jobs, researches questions,
+# writes snapshot.json, then commits it so Pages auto-deploys.
+# Backend never needs a separate server — GitHub Actions IS the backend.
+name: Daily pipeline
+
+on:
+  schedule:
+    - cron: "30 2 * * *"   # 08:00 IST every day (UTC+5:30)
+  workflow_dispatch:        # also triggerable manually from the Actions tab
+
+permissions:
+  contents: write           # needed to commit snapshot.json back
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: python -m radar run
+
+      - name: Export snapshot
+        run: python -m radar export
+
+      - name: Commit snapshot.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ../frontend/public/data/snapshot.json
+          git diff --cached --quiet || git commit -m "chore: daily snapshot $(date -u +%Y-%m-%d)"
+          git push

@@ -98,22 +98,27 @@ def collect_jobs(conn, errors: list[str]) -> tuple[int, int]:
 def collect_web_leads(conn, errors: list[str]) -> int:
     ts, new = now_iso(), 0
     known = {r[0] for r in conn.execute("SELECT url FROM jobs")}
-    for lead in research.web_job_leads(errors):
-        india = scoring.location_ok(f"{lead['title']} {lead['snippet']} {lead['url']}")
-        listing_page = re.search(config.WEB_LEAD_EXCLUDE, lead["title"], re.I)
-        if lead["url"] in known or not india or listing_page or not scoring.title_relevant(lead["title"]):
-            continue
-        known.add(lead["url"])
-        years = scoring.min_years(lead["snippet"])
-        conn.execute(
-            """INSERT OR IGNORE INTO jobs(id, company, source, title, location, url, description, min_years,
-                                          fit_score, keywords, first_seen, last_seen)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (f"web:{lead['company']}:{lead['ext_id']}", lead["company"], "web", lead["title"][:200], "",
-             lead["url"], lead["snippet"], years,
-             scoring.fit_score(lead["title"], lead["snippet"], lead["snippet"], years) - 10,  # unverified
-             json.dumps(scoring.keywords(lead["title"] + " " + lead["snippet"])), ts, ts))
-        new += 1
+    # (lead, source tag, whether an India/remote location is required)
+    batches = [(research.web_job_leads(errors), "web", True),
+               (research.rss_job_leads(errors), "rss", config.JOB_RSS_REQUIRE_INDIA)]
+    for leads, src, require_india in batches:
+        for lead in leads:
+            india = scoring.location_ok(f"{lead['title']} {lead['snippet']} {lead['url']}")
+            listing_page = re.search(config.WEB_LEAD_EXCLUDE, lead["title"], re.I)
+            if (lead["url"] in known or listing_page or not scoring.title_relevant(lead["title"])
+                    or (require_india and not india)):
+                continue
+            known.add(lead["url"])
+            years = scoring.min_years(lead["snippet"])
+            conn.execute(
+                """INSERT OR IGNORE INTO jobs(id, company, source, title, location, url, description, min_years,
+                                              fit_score, keywords, first_seen, last_seen)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"{src}:{lead['company']}:{lead['ext_id']}", lead["company"], src, lead["title"][:200], "",
+                 lead["url"], lead["snippet"], years,
+                 scoring.fit_score(lead["title"], lead["snippet"], lead["snippet"], years) - 10,  # unverified
+                 json.dumps(scoring.keywords(lead["title"] + " " + lead["snippet"])), ts, ts))
+            new += 1
     return new
 
 

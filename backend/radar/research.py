@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor
 import time
 from dataclasses import dataclass
 from typing import Iterable
@@ -197,11 +198,32 @@ def _tavily(query: str, timelimit: str) -> list[dict]:
 
 
 def _ddgs(query: str, timelimit: str) -> list[dict]:
+    """Free search via ddgs. Tries the primary engine (Yandex), then the fallbacks, and
+    returns the first engine that yields results. ddgs raises when an engine finds nothing
+    or answers with a bot check, so each engine is guarded."""
     import logging
+    import random
+    import time
     from ddgs import DDGS
     logging.getLogger("ddgs").setLevel(logging.ERROR)
-    return list(DDGS(timeout=15).text(query, backend=config.WEB_BACKEND, region="in-en", timelimit=timelimit,
-                                      max_results=config.WEB_RESULTS_PER_QUERY) or [])
+    engines = [config.WEB_BACKEND, *config.WEB_BACKEND_FALLBACKS]
+    last_exc: Exception | None = None
+    # Yandex answers automated queries well but soft-rate-limits after rapid calls (returns
+    # nothing). Retry the engines a few times with a backoff so a busy run still gets results.
+    for attempt in range(config.WEB_RETRIES):
+        time.sleep(random.uniform(*config.WEB_PACE_SECONDS))
+        for engine in engines:
+            try:
+                hits = list(DDGS(timeout=config.WEB_HTTP_TIMEOUT).text(
+                    query, backend=engine, region="in-en", timelimit=timelimit,
+                    max_results=config.WEB_RESULTS_PER_QUERY) or [])
+                if hits:
+                    return hits
+            except Exception as ex:  # "No results found." / bot check / timeout: try the next engine
+                last_exc = ex
+    if last_exc:
+        raise last_exc
+    return []
 
 
 def web_search(query: str, errors: list[str], timelimit: str | None = None) -> list[dict]:
@@ -221,13 +243,50 @@ def fetchable(url: str) -> bool:
 
 
 def web_question_articles(errors: list[str]) -> list[Article]:
-    out = []
+    out, seen = [], set()
     for company in config.WEB_QUESTION_COMPANIES:
-        for r in web_search(config.WEB_QUESTION_QUERY.format(company=company), errors, config.WEB_QUESTION_TIMELIMIT):
-            if not fetchable(r.get("href", "")):
-                continue
-            out.append(Article(url=r.get("href", ""), title=r.get("title", ""), source="Web search",
-                               published=None, text="", use="questions", company=company))
+        for query in config.WEB_QUESTION_QUERIES:
+            for r in web_search(query.format(company=company), errors, config.WEB_QUESTION_TIMELIMIT):
+                url = r.get("href", "")
+                if not fetchable(url) or url in seen:  # skip login-walled sites and duplicates
+                    continue
+                seen.add(url)
+                out.append(Article(url=url, title=r.get("title", ""), source="Web search",
+                                   published=None, text="", use="questions", company=company))
+    return out
+
+
+def rss_job_leads(errors: list[str]) -> list[dict]:
+    """Parse configured job-board RSS feeds so new roles aren't missed day to day.
+    Returns lead dicts shaped like web_job_leads (title, snippet, url, company, ext_id)."""
+    import feedparser
+    out = []
+    with client() as c:
+        for feed in config.JOB_RSS_FEEDS:
+            try:
+                resp = c.get(feed["url"], headers={"Accept": "application/rss+xml, application/xml, text/xml, */*"})
+                resp.raise_for_status()
+                parsed = feedparser.parse(resp.content)
+                if parsed.bozo and not parsed.entries:
+                    raise RuntimeError(str(parsed.bozo_exception)[:120])
+                for e in parsed.entries[:40]:
+                    title = strip_html(e.get("title", ""))
+                    url = e.get("link", "")
+                    if not title or not url:
+                        continue
+                    # WeWorkRemotely titles are "Company: Role"; split the company out when present.
+                    company, _, role = title.partition(":")
+                    if role.strip():
+                        company, title = company.strip(), role.strip()
+                    else:
+                        company = feed["name"]
+                    out.append({
+                        "title": title, "snippet": strip_html(e.get("summary", ""))[:600],
+                        "url": url, "company": company[:60] or feed["name"],
+                        "ext_id": hashlib.sha1(url.encode()).hexdigest()[:16],
+                    })
+            except Exception as ex:  # one bad feed never stops the run
+                errors.append(f"job rss {feed['name']}: {ex}")
     return out
 
 
@@ -259,9 +318,14 @@ def collect(known_urls: set[str], errors: list[str]) -> tuple[list[Article], lis
         articles = rss_articles(c, errors) + devto_articles(c, errors) + hn_articles(c, errors) + web_question_articles(errors)
         new = [a for a in articles if a.url and a.url not in known_urls]
         blogs = [a for a in new if a.use == "blog"]
-        questions: list[Question] = []
+        # Phase 1: gather (article, text) pairs. Kept sequential because it shares the
+        # HTTP client and respects the WEB_PAGES_TO_READ page-fetch budget.
+        pairs: list[tuple[Article, str]] = []
         fetched = 0
-        for a in (a for a in new if a.use == "questions"):
+        # Company-tagged web articles first, so they win the page-fetch budget over generic blogs
+        # (grouping questions by company is the point).
+        q_articles = sorted((a for a in new if a.use == "questions"), key=lambda a: a.company is None)
+        for a in q_articles:
             text = a.text
             if len(text) < 400:  # feed gave a teaser only: read the page
                 if fetched >= config.WEB_PAGES_TO_READ or not fetchable(a.url):
@@ -274,7 +338,19 @@ def collect(known_urls: set[str], errors: list[str]) -> tuple[list[Article], lis
                     continue
             if "interview" not in (a.title + text[:3000]).lower():
                 continue
-            questions.extend(questions_from(a, text, use_llm))
+            pairs.append((a, text))
+
+        # Phase 2: LLM extraction. Parallelise across the available NIM keys so each
+        # worker round-robins onto a different key (falls back to serial without a key).
+        questions: list[Question] = []
+        workers = max(1, min(llm.key_count(), len(pairs))) if use_llm else 1
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for qs in pool.map(lambda p: questions_from(p[0], p[1], use_llm), pairs):
+                    questions.extend(qs)
+        else:
+            for a, text in pairs:
+                questions.extend(questions_from(a, text, use_llm))
         return blogs + [a for a in new if a.use == "questions"], questions
 
 

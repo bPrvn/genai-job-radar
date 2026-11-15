@@ -118,6 +118,18 @@ RSS_FEEDS = [
     {"name": "Lilian Weng", "url": "https://lilianweng.github.io/index.xml", "use": "blog"},
 ]
 
+# Job-board RSS feeds, parsed daily so new roles aren't missed. Add any real RSS feed URL here.
+# NOTE: Naukri and Hirist do NOT publish public RSS feeds (naukri /jobs-rss = 404; hirist returns
+# HTML, not a feed) and their robots.txt forbids scraping, so they can't be ingested this way.
+# These are remote-first boards that DO expose RSS; location is filtered loosely so India-eligible
+# remote roles come through. Each entry: {name, url}.
+JOB_RSS_FEEDS = [
+    {"name": "WeWorkRemotely", "url": "https://weworkremotely.com/categories/remote-programming-jobs.rss"},
+    {"name": "WeWorkRemotely DevOps", "url": "https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss"},
+]
+# RSS leads keep roles whose title matches; set True to also require an India/remote location hint.
+JOB_RSS_REQUIRE_INDIA = False
+
 # ---------------------------------------------------------------- Web search agent
 # Uses Tavily (free 1,000 searches/month, tavily.com) when TAVILY_API_KEY is in backend/.env,
 # otherwise the free `ddgs` package. ~23 searches per daily run.
@@ -127,19 +139,31 @@ WEB_JOB_COMPANIES = ["Microsoft", "Walmart Global Tech", "Uber", "JPMorgan Chase
 WEB_JOB_QUERIES = ["{company} generative AI machine learning engineer jobs India"]
 # Search results that are listing / aggregator pages, not one job.
 WEB_LEAD_EXCLUDE = r"\d+\s+(open|openings|jobs|roles|vacancies)|jobs (&|and) careers|jobs in (india|bengaluru|bangalore|hyderabad)|careers page|salary|salaries|interview"
-WEB_QUESTION_QUERY = "{company} machine learning engineer interview experience questions"
+# Several query angles per company → more pages from the scrape-friendly sites (igotanoffer,
+# InterviewQuery, GeeksforGeeks, InterviewBit, DataFord, engineering blogs). Login-walled sites
+# that forbid automated access (LinkedIn, Glassdoor, AmbitionBox) are filtered by NO_FETCH_DOMAINS.
+WEB_QUESTION_QUERY = "{company} machine learning engineer interview experience questions"  # kept for compatibility
+WEB_QUESTION_QUERIES = [
+    "{company} machine learning engineer interview questions",
+    "{company} generative AI engineer interview experience",
+    "{company} GenAI LLM interview questions rounds",
+]
 WEB_QUESTION_COMPANIES = ["Apple", "Google", "Microsoft", "Amazon", "Nvidia", "Atlassian", "Salesforce",
                           "Adobe", "Walmart Global Tech", "Uber", "Flipkart"]
 WEB_TIMELIMIT = "m"        # d / w / m / y: only results from the last month
 WEB_QUESTION_TIMELIMIT = "y"
-WEB_BACKEND = "auto"       # ddgs engines; used when TAVILY_API_KEY is not set
+WEB_BACKEND = "yandex"     # ddgs primary engine (free). Yandex answers automated queries where
+WEB_BACKEND_FALLBACKS = ["brave", "mojeek"]  # quick extra tries (duckduckgo's html endpoint hangs, so it's out)
+WEB_RETRIES = 3            # retry the engines this many times (yandex soft-rate-limits after rapid queries)
+WEB_PACE_SECONDS = (2.5, 4.5)  # random wait before each search attempt, to stay under the rate limit
+WEB_HTTP_TIMEOUT = 12      # per search-engine request
 # Never fetched or mined (login walls / terms forbid scraping). Links from them can still appear as leads.
 NO_FETCH_DOMAINS = ["glassdoor.", "linkedin.com", "naukri.com", "indeed.", "ambitionbox.com", "reddit.com", "quora.com"]
 WEB_RESULTS_PER_QUERY = 6
-WEB_PAGES_TO_READ = 12     # articles fetched and mined for questions per run
+WEB_PAGES_TO_READ = 30     # articles fetched and mined for questions per run (broader company coverage)
 
 # ---------------------------------------------------------------- NVIDIA NIM (daily summary + question extraction)
 # Key comes from NVIDIA_API_KEY in backend/.env (never committed). Without a key the
 # pipeline still runs: questions use the rule-based extractor and the summary is a template.
 NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
-NIM_MODEL = "meta/llama-3.3-70b-instruct"
+NIM_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"

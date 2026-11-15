@@ -5,7 +5,7 @@ name: Deploy dashboard
 on:
   push:
     branches: [main]
-    paths: ["frontend/**", ".github/workflows/pages.yml"]
+    paths: ["frontend/**", ".github/workflows/pages.yml", "frontend/public/data/snapshot.json"]
   workflow_dispatch:
 
 permissions:

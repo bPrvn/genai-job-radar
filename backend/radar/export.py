@@ -16,7 +16,7 @@ def build(personal: bool = True) -> dict:
                    FROM jobs WHERE active=1 OR status NOT IN ('New', 'Not a fit')
                    ORDER BY first_seen DESC, fit_score DESC"""):
             d = row_to_dict(r)
-            d["tier"] = config.TIERS.get(d["company"], "Web lead" if d["source"] == "web" else "Other")
+            d["tier"] = config.TIERS.get(d["company"], "Web lead" if d["source"] in ("web", "rss") else "Other")
             if not personal:
                 d.pop("status"); d.pop("notes")
             jobs.append(d)
