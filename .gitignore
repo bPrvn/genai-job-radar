@@ -1,5 +1,7 @@
 # local data and secrets: never committed
 data/
+!frontend/public/data/
+!frontend/public/data/snapshot.json
 backend/.env
 backend/.venv/
 __pycache__/
