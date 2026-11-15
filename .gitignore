@@ -1,7 +1,8 @@
 # local data and secrets: never committed
-data/
-!frontend/public/data/
-!frontend/public/data/snapshot.json
+data/*.db-shm
+data/*.db-wal
+backend/.env
+!data/radar.db
 backend/.env
 backend/.venv/
 __pycache__/
